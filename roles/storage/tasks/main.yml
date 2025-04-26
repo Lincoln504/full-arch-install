@@ -1,0 +1,32 @@
+---
+# Tasks for mounting additional storage like MicroSD card (Role: storage) - Stage 2
+- name: Storage | Get target user UID and GID
+  ansible.builtin.getent: { database: passwd, key: "{{ target_user }}" }
+  register: target_user_info_storage
+  check_mode: no
+  when: use_microsd | default(false) | bool
+- name: Storage | Check if MicroSD partition device exists
+  become: yes
+  ansible.builtin.stat: { path: "{{ microsd_partition_to_mount }}" }
+  register: microsd_partition_stat
+  when: use_microsd | default(false) | bool
+- name: Storage | Ensure MicroSD mount point directory exists
+  become: yes
+  ansible.builtin.file: { path: "{{ microsd_mount_point }}", state: directory, mode: '0755', owner: "{{ target_user }}", group: "{{ target_user_info_storage.ansible_facts.getent_passwd[target_user][3] }}" }
+  register: create_mountpoint_result
+  failed_when: create_mountpoint_result.failed
+  when: [use_microsd | default(false) | bool, microsd_partition_stat.stat.exists | default(false), target_user_info_storage.ansible_facts.getent_passwd is defined]
+- name: Storage | Ensure MicroSD is configured in fstab and mounted
+  become: yes
+  ansible.posix.mount: { src: "{{ microsd_partition_to_mount }}", path: "{{ microsd_mount_point }}", fstype: "{{ microsd_filesystem_type }}", opts: "defaults,nofail,noatime,x-systemd.device-timeout=10s", state: mounted }
+  register: mount_microsd_result
+  failed_when: mount_microsd_result.failed
+  when: [use_microsd | default(false) | bool, microsd_partition_stat.stat.exists | default(false)]
+- name: Storage | Verify MicroSD mount point is active
+  become: yes
+  ansible.builtin.command: { cmd: "mountpoint -q {{ microsd_mount_point }}" }
+  register: mountpoint_check
+  failed_when: mountpoint_check.rc != 0
+  changed_when: false
+  check_mode: no
+  when: [use_microsd | default(false) | bool, microsd_partition_stat.stat.exists | default(false)]

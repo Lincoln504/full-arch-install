@@ -1,0 +1,17 @@
+# Example Vault File for Two-Stage Ansible Arch Install
+# Create the real file using: ansible-vault create group_vars/all/vault.yml
+
+# --- Hashed Passwords (REQUIRED) ---
+# vault_root_password_hash: $6$salt$your_root_hash_here...
+# vault_ldeen_password_hash: $6$salt$your_ldeen_hash_here...
+
+# --- Wi-Fi Password (Required if configure_wifi_in_stage1: true) ---
+# vault_wifi_password: "YourWifiPassword"
+
+# --- GitHub Credentials for GCM (Required if git_credential_manager_enabled: true) ---
+# vault_github_username: "YourGitHubUsername"
+# vault_github_password: "YourGitHubPasswordOrPAT" # Use a Personal Access Token (PAT) if 2FA is enabled
+
+# --- Optional Secrets ---
+# vault_unsplash_api_key: "YOUR_UNSPLASH_KEY_HERE"
+# vault_git_token: "YOUR_GIT_PAT_HERE" # Alternative token storage if not using GCM

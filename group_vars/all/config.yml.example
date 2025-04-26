@@ -1,0 +1,198 @@
+# Example Configuration for Two-Stage Ansible Arch Install (Uses Vault)
+# Copy this file to 'group_vars/all/config.yml', fill in your specific values.
+
+# --- Connection Settings ---
+live_env_ssh_user: "root"
+controller_root_private_key_file: "~/.ssh/id_ed25519"
+target_user: "ldeen"
+target_user_private_key_file: "~/.ssh/id_ed25519_ldeen"
+
+# --- Target Disk and EXISTING Partition Usage (Stage 1) ---
+# !! CRITICAL !! ENSURE THESE MATCH YOUR LAPTOP'S ACTUAL EXISTING PARTITIONS !!
+target_disk: "/dev/mmcblk0"
+target_existing_partitions:
+  - device: "/dev/mmcblk0p1"
+    filesystem: "vfat"
+    mount_point: "/boot/efi"
+  - device: "/dev/mmcblk0p3"
+    filesystem: "ext4"
+    mount_point: "/boot"
+  - device: "/dev/mmcblk0p2"
+    filesystem: "ext4"
+    mount_point: "/"
+filesystem_options:
+  "/": "-L ROOT"
+  "/boot": "-L BOOT"
+  "/boot/efi": "-F 32 -n EFI"
+
+# --- Wi-Fi Configuration ---
+configure_wifi_in_stage1: true
+wifi_ssid: "YourWifiNetworkName"
+
+# --- MicroSD Card Configuration ---
+use_microsd: true
+microsd_partition_to_mount: "/dev/mmcblk1p1"
+microsd_filesystem_type: "ext4"
+microsd_mount_point: "/home/{{ target_user }}/MicroSD"
+
+# --- Swap Files ---
+create_primary_swap: true
+primary_swap_path: "/swapfile"
+primary_swap_size: "8G"
+primary_swap_priority: -2
+create_secondary_swap: true
+secondary_swap_path_relative: "swapfile_sd"
+secondary_swap_size: "10G"
+secondary_swap_priority: 10
+root_swappiness: 60
+
+# --- Locale and Timezone ---
+locale_lang: "en_US.UTF-8"
+timezone: "America/Los_Angeles"
+keymap: "us"
+
+# --- Hostname ---
+target_hostname: "arch-sway-laptop"
+
+# --- Bootloader ---
+boot_mode: "UEFI"
+bootloader: "grub"
+grub_bootloader_id: "GRUB"
+
+# --- Base Packages (Stage 1) ---
+base_packages:
+  - base
+  - linux
+  - linux-firmware
+  - base-devel
+  - intel-ucode # OR amd-ucode
+  - grub
+  - efibootmgr
+  - networkmanager
+  - avahi
+  - openssh
+  - sudo
+  - git
+  - python
+  - python-pip
+  - python-passlib
+  - reflector
+  - man-db
+  - man-pages
+  - texinfo
+  - vim
+
+# --- Extra Packages (Stage 2) ---
+# *** Ensure the chosen firewall package (nftables or ufw) is uncommented/listed here ***
+# *** Ensure 'curl' is listed if using GCM install script ***
+extra_packages:
+  - sway
+  - swaybg
+  - swayidle
+  - waybar
+  - wofi
+  - foot
+  - alacritty
+  - mako
+  - grim
+  - slurp
+  - wl-clipboard
+  - xdg-desktop-portal-wlr
+  - xorg-xwayland
+  - seatd
+  - brightnessctl
+  - playerctl
+  - network-manager-applet
+  - qt5-wayland
+  - qt6-wayland
+  - pipewire
+  - pipewire-alsa
+  - pipewire-pulse
+  - wireplumber
+  - pavucontrol
+  - polkit
+  - dconf
+  - qt5ct
+  - qt6ct
+  - papirus-icon-theme
+  - python-pywal
+  - python-i3ipc
+  - ttf-fira-code
+  - noto-fonts
+  - noto-fonts-emoji
+  - ttf-font-awesome
+  - firefox
+  - htop
+  - tmux
+  - rsync
+  - unzip
+  - curl # Needed for GCM install script
+  - wget
+  - jq
+  - micro # ADDED
+  - nautilus
+  - code
+  - iio-sensor-proxy # If install_autorotation is true
+  - docker          # If install_docker is true
+  - docker-compose  # If install_docker is true
+  - nftables        # If firewall_choice == 'nftables'
+  # - ufw           # If firewall_choice == 'ufw'
+  - tlp
+  - cpupower
+  - xdg-user-dirs
+  - gstreamer
+  - gst-plugins-good
+  - gst-plugins-bad
+  - gst-plugins-ugly
+  - gst-libav
+  - ffmpeg
+
+# --- AUR Packages (Stage 2) ---
+aur_packages:
+  - yay
+  - libinput-gestures
+  # - git-credential-manager # No longer needed from AUR, installed via script
+  - nwg-bar
+  - adwaita-qt5-git
+  - adwaita-qt6-git
+  - autotiling
+  # Optional GUI Tools (Uncomment to install)
+  # - tlpui
+  # - cpupower-gui
+
+# --- User Configuration ---
+target_user_shell: "/bin/bash"
+target_user_groups: "wheel,input,video,audio,seat"
+target_user_ssh_pub_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGVRXtUvDWSN84LZyu2FPErE7VaoYGbJPRRkhKtUEkir lincolndeen@localhost.localdomain" # PASTE YOUR PUBLIC KEY HERE
+
+# --- Git Configuration ---
+git_user_name: "Your Name"
+git_user_email: "your.email@example.com"
+# --- Git Credential Manager (GCM) ---
+git_credential_manager_enabled: true # Set to true to install and configure GCM
+# If true, you MUST provide vault_github_username and vault_github_password in vault.yml
+
+# --- Feature Flags ---
+install_docker: true
+install_autorotation: true
+firewall_choice: "nftables"
+
+# --- Services to Enable (Stage 2) ---
+enabled_services:
+  - seatd.service
+  - nftables.service      # If firewall_choice == 'nftables'
+  # - ufw.service         # If firewall_choice == 'ufw'
+  - iio-sensor-proxy.service # If install_autorotation is true
+  - tlp.service
+
+# --- Optional: Unsplash API Key ---
+# unsplash_api_key: "{{ vault_unsplash_api_key | default('') }}"
+unsplash_api_key: ""
+
+# --- Theming ---
+gtk_theme_name: "Adwaita-dark"
+icon_theme_name: "Papirus-Dark"
+cursor_theme_name: "Adwaita"
+
+# --- Autorotation/Tablet Mode ---
+touchscreen_identifier_pattern: "Touch"

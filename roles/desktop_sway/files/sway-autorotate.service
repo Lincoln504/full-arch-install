@@ -1,0 +1,12 @@
+[Unit]
+Description=Sway automatic screen rotation and tablet mode script
+After=sway-session.target iio-sensor-proxy.service graphical-session.target
+BindsTo=sway-session.target graphical-session.target
+[Service]
+Type=simple
+Environment="PATH=/usr/local/bin:/usr/bin:/bin:/home/{{ target_user }}/.local/bin"
+ExecStart=/usr/local/bin/sway-autorotate.sh
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=sway-session.target graphical-session.target

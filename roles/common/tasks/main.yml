@@ -1,0 +1,79 @@
+---
+# Common configuration tasks for the newly installed Arch system (Role: common) - Stage 2
+- name: Common | Update pacman database
+  become: yes
+  ansible.builtin.pacman: { update_cache: yes }
+  register: pacman_update_result
+  failed_when: pacman_update_result.failed
+- name: Common | Upgrade all system packages
+  become: yes
+  ansible.builtin.pacman: { upgrade: yes }
+  register: pacman_upgrade_result
+  failed_when: pacman_upgrade_result.failed
+- name: Common | Install base development tools (ensure present)
+  become: yes
+  ansible.builtin.package: { name: base-devel, state: present }
+  register: base_devel_result
+  failed_when: base_devel_result.failed
+- name: Common | Ensure git is installed (needed for yay and GCM)
+  become: yes
+  ansible.builtin.package: { name: git, state: present }
+  register: git_install_result
+  failed_when: git_install_result.failed
+- name: Common | Check if yay is already installed
+  ansible.builtin.command: which yay
+  register: yay_check
+  changed_when: false
+  failed_when: false
+  check_mode: no
+- name: Common | Install yay AUR helper
+  when: yay_check.rc != 0
+  block:
+    - name: Common | Create temporary build directory for yay
+      become: yes
+      become_user: "{{ target_user }}"
+      ansible.builtin.tempfile: { state: directory, prefix: yay_build_ }
+      register: yay_build_dir_result
+    - name: Common | Clone yay repository from AUR into temp dir
+      become: yes
+      become_user: "{{ target_user }}"
+      ansible.builtin.git: { repo: 'https://aur.archlinux.org/yay.git', dest: "{{ yay_build_dir_result.path }}", version: master }
+      register: yay_clone_result
+      failed_when: yay_clone_result.failed
+    - name: Common | Build and install yay using makepkg
+      become: yes
+      become_user: "{{ target_user }}"
+      ansible.builtin.command: { cmd: makepkg -si --noconfirm, chdir: "{{ yay_build_dir_result.path }}" }
+      register: yay_makepkg_result
+      failed_when: yay_makepkg_result.rc != 0
+      when: yay_clone_result.changed
+  always:
+    - name: Common | Clean up yay build directory
+      become: yes
+      become_user: "{{ target_user }}"
+      ansible.builtin.file: { path: "{{ yay_build_dir_result.path }}", state: absent }
+      when: yay_build_dir_result.path is defined
+- name: Common | Verify yay command is available after installation attempt
+  ansible.builtin.command: which yay
+  register: yay_check_after
+  changed_when: false
+  failed_when: yay_check_after.rc != 0
+  check_mode: no
+- name: Common | Install essential helper packages and Extra Packages from config
+  become: yes
+  ansible.builtin.package: { name: "{{ extra_packages | default([]) }}", state: present }
+  register: extra_pkgs_result
+  failed_when: extra_pkgs_result.failed
+  when: extra_packages is defined and extra_packages | length > 0
+- name: Common | Set kernel swappiness parameter via sysctl
+  become: yes
+  ansible.posix.sysctl: { name: vm.swappiness, value: "{{ root_swappiness | default(60) }}", sysctl_file: /etc/sysctl.d/99-swappiness.conf, state: present, reload: yes }
+  register: sysctl_swappiness_result
+  failed_when: sysctl_swappiness_result.failed
+- name: Common | Verify kernel swappiness parameter is set correctly
+  become: yes
+  ansible.builtin.command: { cmd: "sysctl -n vm.swappiness" }
+  register: swappiness_check_result
+  changed_when: false
+  failed_when: swappiness_check_result.rc != 0 or swappiness_check_result.stdout | int != (root_swappiness | default(60) | int)
+  check_mode: no

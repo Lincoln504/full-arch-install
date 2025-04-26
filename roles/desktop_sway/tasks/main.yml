@@ -1,0 +1,146 @@
+---
+# Tasks to install and configure Sway environment (Role: desktop_sway) - Stage 2
+- name: Sway | Get target user UID and GID
+  ansible.builtin.getent: { database: passwd, key: "{{ target_user }}" }
+  register: target_user_info
+  check_mode: no
+- name: Sway | Set DBUS environment variables for user tasks
+  ansible.builtin.set_fact: { user_dbus_env: { DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ target_user_info.ansible_facts.getent_passwd[target_user][1] }}/bus", XDG_RUNTIME_DIR: "/run/user/{{ target_user_info.ansible_facts.getent_passwd[target_user][1] }}" } }
+  when: target_user_info.ansible_facts.getent_passwd is defined and target_user in target_user_info.ansible_facts.getent_passwd
+- name: Sway | Set GTK theme preference via gsettings
+  ansible.builtin.command: { cmd: "runuser -l {{ target_user }} -c 'gsettings set org.gnome.desktop.interface gtk-theme \"{{ gtk_theme_name | default('Adwaita-dark') }}\"'" }
+  register: gsettings_theme_result
+  changed_when: false
+  failed_when: gsettings_theme_result.rc != 0 and 'not found' not in gsettings_theme_result.stderr | lower and 'no such schema' not in gsettings_theme_result.stderr | lower
+  environment: "{{ user_dbus_env | default({}) }}"
+  when: target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Set GTK icon theme preference via gsettings
+  ansible.builtin.command: { cmd: "runuser -l {{ target_user }} -c 'gsettings set org.gnome.desktop.interface icon-theme \"{{ icon_theme_name | default('Papirus-Dark') }}\"'" }
+  register: gsettings_icon_result
+  changed_when: false
+  failed_when: gsettings_icon_result.rc != 0 and 'not found' not in gsettings_icon_result.stderr | lower and 'no such schema' not in gsettings_icon_result.stderr | lower
+  environment: "{{ user_dbus_env | default({}) }}"
+  when: target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Set GTK cursor theme preference via gsettings
+  ansible.builtin.command: { cmd: "runuser -l {{ target_user }} -c 'gsettings set org.gnome.desktop.interface cursor-theme \"{{ cursor_theme_name | default('Adwaita') }}\"'" }
+  register: gsettings_cursor_result
+  changed_when: false
+  failed_when: gsettings_cursor_result.rc != 0 and 'not found' not in gsettings_cursor_result.stderr | lower and 'no such schema' not in gsettings_cursor_result.stderr | lower
+  environment: "{{ user_dbus_env | default({}) }}"
+  when: target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Set QT_QPA_PLATFORMTHEME environment variable for Qt apps
+  become: yes
+  ansible.builtin.lineinfile: { path: /etc/environment, line: "QT_QPA_PLATFORMTHEME=qt5ct", create: yes, mode: '0644' }
+  register: qt_env_result
+  failed_when: qt_env_result.failed
+- name: Sway | Ensure target user config directory exists
+  ansible.builtin.file: { path: "/home/{{ target_user }}/.config", state: directory, owner: "{{ target_user }}", group: "{{ target_user_info.ansible_facts.getent_passwd[target_user][3] }}", mode: '0755' }
+  when: target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Ensure user script directory exists
+  ansible.builtin.file: { path: "/home/{{ target_user }}/.local/bin", state: directory, owner: "{{ target_user }}", group: "{{ target_user_info.ansible_facts.getent_passwd[target_user][3] }}", mode: '0755' }
+  when: target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Copy user-provided Sway config file
+  ansible.builtin.copy: { src: config, dest: "/home/{{ target_user }}/.config/sway/config", owner: "{{ target_user }}", group: "{{ target_user_info.ansible_facts.getent_passwd[target_user][3] }}", mode: '0644', directory_mode: '0755' }
+  register: sway_config_copy_result
+  failed_when: sway_config_copy_result.failed
+  when: target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Verify Sway config file exists
+  ansible.builtin.stat: { path: "/home/{{ target_user }}/.config/sway/config" }
+  register: sway_config_stat
+  failed_when: not sway_config_stat.stat.exists
+  when: target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Copy user-provided libinput-gestures config file
+  ansible.builtin.copy: { src: libinput-gestures.conf, dest: "/home/{{ target_user }}/.config/libinput-gestures/libinput-gestures.conf", owner: "{{ target_user }}", group: "{{ target_user_info.ansible_facts.getent_passwd[target_user][3] }}", mode: '0644', directory_mode: '0755' }
+  register: gestures_config_copy_result
+  failed_when: gestures_config_copy_result.failed
+  when: target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Verify libinput-gestures config file exists
+  ansible.builtin.stat: { path: "/home/{{ target_user }}/.config/libinput-gestures/libinput-gestures.conf" }
+  register: gestures_config_stat
+  failed_when: not gestures_config_stat.stat.exists
+  when: target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Copy user-provided wallpaper script
+  ansible.builtin.copy: { src: wallpaper.sh, dest: "/home/{{ target_user }}/.local/bin/wallpaper.sh", owner: "{{ target_user }}", group: "{{ target_user_info.ansible_facts.getent_passwd[target_user][3] }}", mode: '0755' }
+  register: wallpaper_script_copy_result
+  failed_when: wallpaper_script_copy_result.failed
+  when: target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Verify wallpaper script exists and is executable
+  ansible.builtin.stat: { path: "/home/{{ target_user }}/.local/bin/wallpaper.sh" }
+  register: wallpaper_script_stat
+  failed_when: not wallpaper_script_stat.stat.exists or wallpaper_script_stat.stat.mode != '0755'
+  when: target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Set Unsplash API key in wallpaper script
+  ansible.builtin.lineinfile: { path: "/home/{{ target_user }}/.local/bin/wallpaper.sh", regexp: '^ACCESS_KEY=".*"', line: 'ACCESS_KEY="{{ unsplash_api_key | default("") }}"', backrefs: yes, owner: "{{ target_user }}", group: "{{ target_user_info.ansible_facts.getent_passwd[target_user][3] }}" }
+  when: unsplash_api_key is defined and target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Copy user-provided or default .bashrc
+  ansible.builtin.copy: { src: .bashrc, dest: "/home/{{ target_user }}/.bashrc", owner: "{{ target_user }}", group: "{{ target_user_info.ansible_facts.getent_passwd[target_user][3] }}", mode: '0644' }
+  register: bashrc_copy_result
+  failed_when: bashrc_copy_result.failed
+  when: target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Verify .bashrc file exists
+  ansible.builtin.stat: { path: "/home/{{ target_user }}/.bashrc" }
+  register: bashrc_stat
+  failed_when: not bashrc_stat.stat.exists
+  when: target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Copy user-provided or default Alacritty config
+  ansible.builtin.template: { src: alacritty.yml.j2, dest: "/home/{{ target_user }}/.config/alacritty/alacritty.yml", owner: "{{ target_user }}", group: "{{ target_user_info.ansible_facts.getent_passwd[target_user][3] }}", mode: '0644', directory_mode: '0755' }
+  register: alacritty_config_copy_result
+  failed_when: alacritty_config_copy_result.failed
+  when: target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Verify Alacritty config file exists
+  ansible.builtin.stat: { path: "/home/{{ target_user }}/.config/alacritty/alacritty.yml" }
+  register: alacritty_config_stat
+  failed_when: not alacritty_config_stat.stat.exists
+  when: target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Ensure /usr/local/bin exists
+  become: yes
+  ansible.builtin.file: { path: /usr/local/bin, state: directory, mode: '0755' }
+  when: install_autorotation | default(false) | bool
+- name: Sway | Copy autorotate script from template
+  become: yes
+  ansible.builtin.template: { src: sway-autorotate.sh.j2, dest: /usr/local/bin/sway-autorotate.sh, owner: root, group: root, mode: '0755' }
+  register: autorotate_script_copy_result
+  failed_when: autorotate_script_copy_result.failed
+  when: install_autorotation | default(false) | bool
+- name: Sway | Verify autorotate script exists and is executable
+  become: yes
+  ansible.builtin.stat: { path: "/usr/local/bin/sway-autorotate.sh" }
+  register: autorotate_script_stat
+  failed_when: not autorotate_script_stat.stat.exists or autorotate_script_stat.stat.mode != '0755'
+  when: install_autorotation | default(false) | bool
+- name: Sway | Ensure systemd user config directory exists
+  ansible.builtin.file: { path: "/home/{{ target_user }}/.config/systemd/user", state: directory, owner: "{{ target_user }}", group: "{{ target_user_info.ansible_facts.getent_passwd[target_user][3] }}", mode: '0755' }
+  when: target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Copy libinput-gestures systemd user service file
+  ansible.builtin.copy: { src: libinput-gestures.service, dest: "/home/{{ target_user }}/.config/systemd/user/libinput-gestures.service", owner: "{{ target_user }}", group: "{{ target_user_info.ansible_facts.getent_passwd[target_user][3] }}", mode: '0644' }
+  register: gestures_service_copy_result
+  failed_when: gestures_service_copy_result.failed
+  when: target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Copy sway-autorotate systemd user service file
+  ansible.builtin.copy: { src: sway-autorotate.service, dest: "/home/{{ target_user }}/.config/systemd/user/sway-autorotate.service", owner: "{{ target_user }}", group: "{{ target_user_info.ansible_facts.getent_passwd[target_user][3] }}", mode: '0644' }
+  register: autorotate_service_copy_result
+  failed_when: autorotate_service_copy_result.failed
+  when: install_autorotation | default(false) | bool and target_user_info.ansible_facts.getent_passwd is defined
+- name: Sway | Enable and start systemd user services (best effort)
+  ansible.builtin.systemd_service: { name: "{{ item }}", scope: user, enabled: yes, state: started }
+  loop: [libinput-gestures.service, sway-autorotate.service]
+  loop_control: { label: "{{ item }}" }
+  when: [target_user_info.ansible_facts.getent_passwd is defined, item != 'sway-autorotate.service' or (install_autorotation | default(false) | bool)]
+  become: yes
+  become_user: "{{ target_user }}"
+  environment: "{{ user_dbus_env | default({}) }}"
+  register: user_service_result
+  failed_when: user_service_result.rc != 0 and 'failed to connect to bus' not in user_service_result.msg | lower and 'does not exist' not in user_service_result.msg | lower and 'service is masked' not in user_service_result.msg | lower
+- name: Sway | Verify systemd user services are enabled (best effort)
+  ansible.builtin.command: { cmd: "runuser -l {{ target_user }} -c 'systemctl --user is-enabled {{ item }}'" }
+  loop: [libinput-gestures.service, sway-autorotate.service]
+  loop_control: { label: "{{ item }}" }
+  register: user_service_enabled_check
+  changed_when: false
+  failed_when: user_service_enabled_check.rc != 0 and 'failed to connect to bus' not in user_service_enabled_check.stderr | lower and 'service is masked' not in user_service_enabled_check.stderr | lower
+  when: [target_user_info.ansible_facts.getent_passwd is defined, item != 'sway-autorotate.service' or (install_autorotation | default(false) | bool)]
+  check_mode: no
+- name: Sway | Assert systemd user services are enabled where possible
+  ansible.builtin.assert: { that: ["'enabled' in item.stdout or 'static' in item.stdout"], fail_msg: "User service {{ item.item }} is not enabled (or check failed due to DBUS). Status: {{ item.stdout | default('N/A') }}", quiet: yes }
+  loop: "{{ user_service_enabled_check.results }}"
+  when: item.rc == 0

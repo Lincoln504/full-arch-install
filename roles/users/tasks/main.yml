@@ -1,0 +1,170 @@
+---
+# Tasks to verify/finalize user setup, Git, and Git Credential Manager (Role: users) - Stage 2
+- name: Users | Verify essential user variables
+  ansible.builtin.assert:
+    that:
+      - target_user is defined
+      - vault_ldeen_password_hash is defined
+      - vault_ldeen_password_hash is match('^\\$6\\$')
+      - target_user_groups is defined
+      - git_user_name is defined
+      - git_user_email is defined
+      - git_credential_manager_enabled is defined
+      - (not (git_credential_manager_enabled | default(false) | bool)) or (vault_github_username is defined and vault_github_password is defined)
+    fail_msg: "User config requires target_user, target_user_groups, git_user_name, git_user_email, git_credential_manager_enabled in config.yml and a valid vault_ldeen_password_hash (SHA512) in vault.yml. If GCM enabled, vault_github_username and vault_github_password are also required."
+    quiet: yes
+- name: Users | Determine final user groups including conditional docker group
+  ansible.builtin.set_fact: { final_user_groups: "{{ (target_user_groups | default('wheel') | split(',')) + (['docker'] if install_docker | default(false) | bool else []) }}" }
+- name: Users | Ensure target user '{{ target_user }}' exists and has correct groups
+  become: yes
+  ansible.builtin.user: { name: "{{ target_user }}", state: present, groups: "{{ final_user_groups | join(',') }}", append: yes }
+  register: user_mod_result
+  failed_when: user_mod_result.failed
+- name: Users | Verify target user group membership
+  become: yes
+  ansible.builtin.command: { cmd: "groups {{ target_user }}" }
+  register: user_groups_check
+  changed_when: false
+  failed_when: user_groups_check.rc != 0
+  check_mode: no
+- name: Users | Assert target user is in required groups
+  ansible.builtin.assert: { that: [item in user_groups_check.stdout], fail_msg: "User '{{ target_user }}' is not a member of required group '{{ item }}'. Current groups: {{ user_groups_check.stdout }}", quiet: yes }
+  loop: "{{ final_user_groups }}"
+- name: Users | Verify target user password hash matches Vault
+  become: yes
+  ansible.builtin.command: { cmd: "getent shadow {{ target_user }}" }
+  register: current_shadow_entry
+  changed_when: false
+  check_mode: no
+  no_log: true
+  failed_when: current_shadow_entry.rc != 0 or (current_shadow_entry.stdout | regex_replace('^[^:]+:') | regex_replace(':.*$') != vault_ldeen_password_hash)
+- name: Users | Verify 'wheel' group members have passwordless sudo (check sudoers)
+  become: yes
+  ansible.builtin.lineinfile: { path: /etc/sudoers, state: present, regexp: '^%wheel ALL=\(ALL:ALL\) NOPASSWD: ALL', line: '%wheel ALL=(ALL:ALL) NOPASSWD: ALL', validate: '/usr/sbin/visudo -cf %s' }
+  check_mode: yes
+- name: Users | Verify user SSH key exists in authorized_keys
+  ansible.builtin.stat: { path: "/home/{{ target_user }}/.ssh/authorized_keys" }
+  register: user_auth_keys_stat
+- name: Users | Check content of user authorized_keys (optional)
+  become: yes
+  ansible.builtin.slurp: { src: "/home/{{ target_user }}/.ssh/authorized_keys" }
+  register: user_auth_keys_content
+  when: user_auth_keys_stat.stat.exists
+  check_mode: no
+- name: Users | Assert user SSH key is present
+  ansible.builtin.assert: { that: [user_auth_keys_stat.stat.exists, target_user_ssh_pub_key in (user_auth_keys_content.content | b64decode)], fail_msg: "Target user SSH key was not found or doesn't match config in /home/{{ target_user }}/.ssh/authorized_keys" }
+  when: [target_user_ssh_pub_key is defined, user_auth_keys_stat.stat.exists, user_auth_keys_content.content is defined]
+- name: Users | Configure Git global user name
+  become: yes
+  become_user: "{{ target_user }}"
+  community.general.git_config:
+    name: user.name
+    scope: global
+    value: "{{ git_user_name }}"
+    state: present
+  when: git_user_name | default('') | length > 0
+- name: Users | Configure Git global user email
+  become: yes
+  become_user: "{{ target_user }}"
+  community.general.git_config:
+    name: user.email
+    scope: global
+    value: "{{ git_user_email }}"
+    state: present
+  when: git_user_email | default('') | length > 0
+
+# --- Git Credential Manager (GCM) Setup ---
+- name: Users | Install and Configure Git Credential Manager
+  when: git_credential_manager_enabled | default(false) | bool
+  become: yes
+  become_user: "{{ target_user }}"
+  block:
+    - name: GCM | Check if GCM is already installed
+      ansible.builtin.command: which git-credential-manager
+      register: gcm_check
+      failed_when: false
+      changed_when: false
+      check_mode: no
+    - name: GCM | Install GCM using source helper script
+      # Needs curl installed (should be handled by 'common' role or 'extra_packages')
+      # Runs the script as the target user
+      ansible.builtin.shell:
+        cmd: "curl -L https://aka.ms/gcm/linux-install-source.sh | sh"
+        warn: false # The script itself prints messages
+      environment:
+        # Ensure user's PATH is likely available if running via sudo/become
+        PATH: "/home/{{ target_user }}/.local/bin:/usr/local/bin:/usr/bin:/bin"
+      args:
+        executable: /bin/bash
+      register: gcm_install_result
+      failed_when: gcm_install_result.rc != 0
+      changed_when: "'Installing Git Credential Manager' in gcm_install_result.stdout"
+      when: gcm_check.rc != 0 # Only run if GCM command not found
+    - name: GCM | Verify GCM command is available after installation attempt
+      ansible.builtin.command: which git-credential-manager
+      register: gcm_check_after
+      changed_when: false
+      failed_when: gcm_check_after.rc != 0
+      check_mode: no
+    - name: GCM | Configure GCM system-wide for the user
+      ansible.builtin.command:
+        cmd: "git-credential-manager configure"
+      environment:
+        PATH: "/home/{{ target_user }}/.local/bin:/usr/local/bin:/usr/bin:/bin"
+      register: gcm_configure_result
+      # Configure might return non-zero if already configured, check stderr
+      failed_when: gcm_configure_result.rc != 0 and 'already configured' not in gcm_configure_result.stderr | lower
+      changed_when: "'Git Credential Manager has been configured successfully' in gcm_configure_result.stdout"
+    - name: GCM | Set credential store to cache
+      community.general.git_config:
+        name: credential.credentialStore
+        scope: global
+        value: cache
+        state: present
+      register: gcm_set_store_result
+      failed_when: gcm_set_store_result.failed
+    - name: GCM | Pre-seed GitHub credentials into GCM cache store
+      ansible.builtin.shell:
+        # Use printf to format input for 'git-credential-manager store'
+        # Keys: protocol, host, username, password. Ends with blank line.
+        cmd: 'printf "protocol=https\nhost=github.com\nusername=%s\npassword=%s\n\n" "{{ vault_github_username }}" "{{ vault_github_password }}" | git-credential-manager store'
+        warn: false # Avoid warning about using shell
+      environment:
+        PATH: "/home/{{ target_user }}/.local/bin:/usr/local/bin:/usr/bin:/bin"
+      args:
+        executable: /bin/bash
+      register: gcm_store_result
+      failed_when: gcm_store_result.rc != 0
+      changed_when: true # Assume credentials updated/added
+      no_log: true # IMPORTANT: Do not log the command or output containing the password
+
+- name: Users | Verify GCM configuration (credentialStore setting)
+  become: yes
+  become_user: "{{ target_user }}"
+  community.general.git_config:
+    name: credential.credentialStore
+    scope: global
+  register: gcm_verify_store
+  check_mode: no
+  when: git_credential_manager_enabled | default(false) | bool
+- name: Users | Assert GCM credential store is set to cache
+  ansible.builtin.assert:
+    that:
+      - gcm_verify_store.value == 'cache'
+    fail_msg: "Git credential.credentialStore is not set to 'cache'. Current value: {{ gcm_verify_store.value | default('Not Set') }}"
+    quiet: yes
+  when: git_credential_manager_enabled | default(false) | bool
+
+# --- XDG User Directories ---
+- name: Users | Run xdg-user-dirs-update to create standard directories
+  become: yes
+  become_user: "{{ target_user }}"
+  ansible.builtin.command: { cmd: "xdg-user-dirs-update", creates: "/home/{{ target_user }}/Documents" }
+  changed_when: true
+  register: xdg_update_result
+  failed_when: xdg_update_result.rc != 0 and 'No skeleton directory' not in xdg_update_result.stderr
+- name: Users | Verify standard XDG directories exist
+  ansible.builtin.stat: { path: "/home/{{ target_user }}/{{ item }}" }
+  loop: [Desktop, Documents, Downloads, Music, Pictures, Public, Templates, Videos]
+  register: xdg_dirs_stat
+  failed_when: not xdg_dirs_stat.stat.exists or not xdg_dirs_stat.stat.isdir

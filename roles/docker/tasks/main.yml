@@ -1,0 +1,14 @@
+---
+# Tasks to install Docker (Role: docker) - Stage 2
+- name: Docker | Determine Docker package names
+  ansible.builtin.set_fact: { docker_packages: ['docker', 'docker-compose'] }
+- name: Docker | Install Docker packages
+  become: yes
+  ansible.builtin.package: { name: "{{ docker_packages }}", state: present }
+  register: docker_pkg_result
+  failed_when: docker_pkg_result.failed
+- name: Docker | Ensure docker group exists
+  become: yes
+  ansible.builtin.group: { name: docker, state: present }
+  register: docker_group_result
+  failed_when: docker_group_result.failed

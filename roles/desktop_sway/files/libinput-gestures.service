@@ -1,0 +1,11 @@
+[Unit]
+Description=Libinput gestures daemon
+After=graphical-session.target
+[Service]
+Type=simple
+Environment="PATH=/usr/local/bin:/usr/bin:/bin:/home/{{ target_user }}/.local/bin"
+ExecStart=/usr/bin/libinput-gestures-setup start
+ExecStop=/usr/bin/libinput-gestures-setup stop
+Restart=on-failure
+[Install]
+WantedBy=graphical-session.target

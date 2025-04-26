@@ -1,0 +1,5 @@
+---
+# Handlers for docker role
+- name: Inform user about Docker group logout
+  ansible.builtin.debug: { msg: "User '{{ target_user }}' added to the 'docker' group. User must log out and log back in for group membership to take effect." }
+  listen: "Inform user about Docker group logout"

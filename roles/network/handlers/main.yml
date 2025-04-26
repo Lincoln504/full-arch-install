@@ -1,0 +1,11 @@
+---
+# Handlers for network role
+- name: Reload NetworkManager connections
+  become: yes
+  ansible.builtin.command: { cmd: nmcli connection reload }
+  changed_when: false
+  listen: "Reload NetworkManager connections"
+- name: Restart NetworkManager
+  become: yes
+  ansible.builtin.systemd_service: { name: NetworkManager.service, state: restarted }
+  listen: "Restart NetworkManager"

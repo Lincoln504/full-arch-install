@@ -1,0 +1,230 @@
+---
+# Playbook to install and configure Arch Linux using a single execution
+# Incorporates two logical stages with a reboot in between.
+# Requires mDNS (.local) hostname resolution to work between stages.
+
+# ---------------------------------------------------------------------
+# Play 1: Base Installation (Runs on Live ISO as root)
+# ---------------------------------------------------------------------
+- name: Play 1 - Install Arch Linux Base System
+  hosts: arch_live # Target group defined in inventory.ini for the Live ISO
+  gather_facts: no # Facts not reliable/useful on live env initially
+  pre_tasks:
+    - name: Base | Verify Essential Variables (Play 1)
+      ansible.builtin.assert:
+        that:
+          - target_disk is defined and target_disk | length > 0
+          - target_existing_partitions is defined and target_existing_partitions | length >= 2
+          - target_hostname is defined
+          - locale_lang is defined
+          - timezone is defined
+          - keymap is defined
+          - bootloader is defined
+          - vault_root_password_hash is defined
+          - vault_ldeen_password_hash is defined
+          - controller_root_private_key_file is defined
+          - target_user_ssh_pub_key is defined
+          - base_packages is defined
+          - target_user is defined
+          - target_user_shell is defined
+        fail_msg: "Required variables for Play 1 not defined/complete in group_vars/all/config.yml or vault.yml not loaded."
+        quiet: yes
+      tags: [always]
+    - name: Base | Ensure Python is installed on Arch Live ISO (for Ansible modules)
+      ansible.builtin.raw: pacman -Syu --noconfirm --needed python
+      changed_when: false
+      failed_when: false
+      tags: [always]
+  roles:
+    - role: base_system
+      tags: [always]
+
+# ---------------------------------------------------------------------
+# Play 2: System Configuration (Runs on Configured System as target_user)
+# ---------------------------------------------------------------------
+- name: Play 2 - Configure Arch Linux System
+  hosts: arch_configured # Target group defined in inventory.ini (using .local hostname)
+  gather_facts: no # <<< Explicitly disable automatic fact gathering
+  pre_tasks:
+    - name: Stage 2 | Verify Essential Variables (Play 2)
+      ansible.builtin.assert:
+        that:
+          - target_user is defined
+          - target_user_private_key_file is defined
+          - target_user_groups is defined
+          - extra_packages is defined
+          - aur_packages is defined
+          - firewall_choice is defined
+          - enabled_services is defined
+          - git_credential_manager_enabled is defined # Check GCM flag
+          - (not (git_credential_manager_enabled | default(false) | bool)) or (vault_github_username is defined and vault_github_password is defined) # Check vault vars if GCM enabled
+        fail_msg: "Required variables for Play 2 not defined/complete in group_vars/all/config.yml or vault.yml (check GCM settings)."
+        quiet: yes
+      tags: [always]
+      delegate_to: localhost
+    - name: Stage 2 | Wait for system to become reachable via SSH as target_user
+      ansible.builtin.wait_for_connection:
+        delay: 15
+        timeout: 600
+        sleep: 10
+      tags: [always]
+    - name: Stage 2 | Gather facts from the new system
+      ansible.builtin.setup:
+      tags: [always]
+    - name: Stage 2 | Verify NetworkManager service is active on target
+      ansible.builtin.systemd_service:
+        name: NetworkManager.service
+        state: started
+      register: nm_service_status_stage2
+      failed_when: nm_service_status_stage2.state != "started" # <-- Corrected check
+      tags: [always]
+      check_mode: no
+    - name: Stage 2 | Verify SSH daemon (sshd) service is active on target
+      ansible.builtin.systemd_service:
+        name: sshd.service
+        state: started
+      register: sshd_service_status_stage2
+      failed_when: sshd_service_status_stage2.state != "started" # <-- Corrected check
+      tags: [always]
+      check_mode: no
+
+  roles:
+    # *** Role Order Matters ***
+    # Roles run first
+    - role: common
+      tags: [common]
+    - role: network
+      tags: [network]
+    - role: users # Includes Git and GCM setup
+      tags: [users]
+    - role: storage
+      when: use_microsd | default(false) | bool
+      tags: [storage]
+    - role: swap
+      tags: [swap]
+    - role: security
+      tags: [security]
+    - role: docker
+      when: install_docker | default(false) | bool
+      tags: [docker]
+    - role: desktop_sway
+      tags: [desktop_sway]
+
+  tasks: # <<< Corrected Indentation
+    # *** Tasks run AFTER roles ***
+    # Install AUR packages AFTER yay is installed by common role
+    - name: Stage 2 | Install AUR packages
+      become: yes
+      become_user: "{{ target_user }}" # Run yay as the target user
+      community.general.pacman: # Use pacman module with yay provider
+        name: "{{ aur_packages | default([]) }}"
+        state: present
+        executable: /usr/bin/yay # Specify yay executable
+        extra_args: "--aur --needed --noconfirm" # Pass args to yay
+      register: aur_install_result
+      failed_when: aur_install_result.rc != 0 and 'already installed' not in aur_install_result.msg # Fail if error other than already installed
+      when: aur_packages is defined and aur_packages | length > 0
+      tags: [aur]
+
+    # Verify AUR packages installed
+    - name: Stage 2 | Verify AUR packages are installed
+      become: yes # Check system packages
+      ansible.builtin.command:
+        cmd: "pacman -Qm {{ item }}" # Check if package exists in AUR db
+      loop: "{{ aur_packages | default([]) }}"
+      register: aur_check_result
+      changed_when: false
+      failed_when: aur_check_result.rc != 0 # Fail if pacman -Qm returns error (not found)
+      when: aur_packages is defined and aur_packages | length > 0
+      tags: [aur, verification]
+
+  post_tasks: # <<< Corrected Indentation
+    # *** Post tasks run last ***
+    - name: Stage 2 | Enable system-wide services defined in config
+      become: yes
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: yes
+        state: "{{ 'started' if item in ['docker.service', 'seatd.service', 'nftables.service', 'ufw.service', 'iio-sensor-proxy.service', 'tlp.service'] else omit }}"
+      loop: "{{ enabled_services | default([]) }}"
+      register: service_enable_result
+      failed_when: service_enable_result.failed
+      when: enabled_services is defined and enabled_services | length > 0
+      tags: [always]
+    - name: Stage 2 | Enable Docker service (conditional)
+      become: yes
+      ansible.builtin.systemd_service:
+        name: docker.service
+        enabled: yes
+        state: started
+      register: docker_enable_result
+      failed_when: docker_enable_result.failed
+      when: install_docker | default(false) | bool
+      tags: [always]
+    - name: Stage 2 | Gather service facts
+      become: yes
+      ansible.builtin.service_facts:
+      tags: [always, verification]
+    - name: Stage 2 | Verify required system services are running
+      become: yes
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services[item + ".service"] is defined
+          - ansible_facts.services[item + ".service"].state == 'running' # Check for 'running' as reported by service_facts
+        fail_msg: "Service {{ item }}.service is not running! State: {{ ansible_facts.services[item + '.service'].state | default('N/A') }}"
+        quiet: yes
+      loop:
+        - NetworkManager
+        - sshd
+        - avahi-daemon
+        - seatd
+        - tlp
+        - "{{ 'nftables' if firewall_choice == 'nftables' else ('ufw' if firewall_choice == 'ufw' else '') }}"
+        - "{{ 'iio-sensor-proxy' if install_autorotation | default(false) | bool else '' }}"
+        - "{{ 'docker' if install_docker | default(false) | bool else '' }}"
+      when: item | length > 0 # Only check items that have a non-empty name
+      tags: [always, verification]
+    - name: Stage 2 | Clean up temporary first-boot Wi-Fi connection service
+      become: yes
+      when: configure_wifi_in_stage1 | default(false) | bool
+      block:
+        - name: Stage 2 | Disable and stop temporary first-boot service
+          ansible.builtin.systemd_service:
+            name: connect-wifi-first-boot.service
+            enabled: no
+            state: stopped
+          failed_when: false
+        - name: Stage 2 | Remove temporary first-boot service file
+          ansible.builtin.file:
+            path: /etc/systemd/system/connect-wifi-first-boot.service
+            state: absent
+        - name: Stage 2 | Remove temporary first-boot script file
+          ansible.builtin.file:
+            path: /usr/local/bin/connect-wifi-first-boot.sh
+            state: absent
+      tags: [always]
+    - name: Stage 2 | Final message
+      ansible.builtin.debug:
+        msg: |
+          ---------------------------------------------------------------------
+          TWO-STAGE ANSIBLE RUN COMPLETE!
+
+          >>> REVIEW & MANUAL STEPS REQUIRED NEXT <<<
+
+          1. Log out and log back in as '{{ target_user }}' for group changes (e.g., Docker) to take effect.
+          2. Verify network connection ('nmcli c s --active', 'ping google.com').
+          3. Verify yay and AUR packages installed ('yay -Q | grep -E "{{ aur_packages | join('|') }}"').
+          4. Verify Git config ('git config --global user.name', 'git config --global credential.helper', 'git config --global credential.credentialStore').
+          5. **Verify GCM:** If enabled, try cloning a private GitHub repository using HTTPS. It should use the cached credentials without prompting:
+             $ git clone https://github.com/YOUR_USERNAME/YOUR_PRIVATE_REPO.git
+             (If it prompts, check GCM setup and vault variables).
+          6. **Configure Autorotation:** Manually edit '/usr/local/bin/sway-autorotate.sh' and set the correct 'TABLET_MODE_SYSFS_PATH' for your hardware.
+             $ sudo nano /usr/local/bin/sway-autorotate.sh
+             $ systemctl --user restart sway-autorotate.service
+          7. **Configure Qt Theming:** Run 'qt5ct' and 'qt6ct'. Select 'adwaita-dark' (or your preferred theme) and 'Papirus-Dark' icons. Apply and save.
+          8. **Configure nwg-bar:** If you want the pop-up bar behavior, you'll need to manually configure nwg-bar and potentially bind it to a key in your Sway config. Refer to nwg-bar documentation.
+          9. Check '~/.bashrc' and '~/.config/alacritty/alacritty.yml' were configured as expected.
+          10. Start Sway: $ sway (from TTY after logging in as '{{ target_user }}')
+          11. Test everything! (Swap, MicroSD mount, gestures, wallpaper, apps, power management, firewall rules, etc.)
+          ---------------------------------------------------------------------
+      tags: [always]

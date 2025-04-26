@@ -1,0 +1,20 @@
+#!/usr/sbin/nft -f
+# Ansible Managed: Configure basic nftables ruleset
+flush ruleset
+table inet filter {
+  chain input {
+    type filter hook input priority filter; policy drop;
+    ct state {established, related} accept
+    iifname lo accept
+    ip protocol icmp accept comment "Allow IPv4 Ping"
+    ip6 nexthdr ipv6-icmp accept comment "Allow IPv6 Ping"
+    tcp dport 22 accept comment "Allow SSH"
+    counter drop comment "Count and drop remaining packets"
+  }
+  chain forward {
+    type filter hook forward priority filter; policy drop;
+  }
+  chain output {
+    type filter hook output priority filter; policy accept;
+  }
+}

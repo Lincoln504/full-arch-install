@@ -1,0 +1,8 @@
+---
+# Handlers for role base_system
+- name: Generate locale via chroot
+  listen: "Generate locale via chroot"
+  ansible.builtin.command: { cmd: "arch-chroot /mnt locale-gen" }
+  changed_when: true
+  register: locale_gen_handler_result
+  failed_when: locale_gen_handler_result.rc != 0

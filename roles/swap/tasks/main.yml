@@ -1,0 +1,96 @@
+---
+# Tasks for Swap Files setup (Role: swap) - Stage 2
+- name: Swap | Create primary swap file on root filesystem
+  become: yes
+  when: create_primary_swap | default(false) | bool
+  block:
+    - name: Swap | Ensure primary swap file exists with correct size (using fallocate)
+      ansible.builtin.command: { cmd: "fallocate -l {{ primary_swap_size }} {{ primary_swap_path }}", creates: "{{ primary_swap_path }}" }
+      register: fallocate_primary_result
+      changed_when: fallocate_primary_result.rc == 0 and fallocate_primary_result.stdout is search('created')
+      failed_when: fallocate_primary_result.rc != 0 and 'already exists' not in fallocate_primary_result.stderr
+    - name: Swap | Verify primary swap file size and existence
+      ansible.builtin.stat: { path: "{{ primary_swap_path }}" }
+      register: primary_swap_stat
+      failed_when: not primary_swap_stat.stat.exists or primary_swap_stat.stat.size != (primary_swap_size | human_to_bytes)
+    - name: Swap | Set permissions for primary swap file
+      ansible.builtin.file: { path: "{{ primary_swap_path }}", owner: root, group: root, mode: '0600' }
+      register: primary_chmod_result
+      failed_when: primary_chmod_result.failed
+    - name: Swap | Check if primary path is already formatted as swap
+      ansible.builtin.command: { cmd: "blkid -p -o value -s TYPE {{ primary_swap_path }}" }
+      register: primary_blkid_result
+      changed_when: false
+      failed_when: false
+    - name: Swap | Format primary swap file if not already formatted
+      community.general.filesystem: { fstype: swap, device: "{{ primary_swap_path }}", force: no }
+      register: primary_mkswap_result
+      failed_when: primary_mkswap_result.failed
+      when: "'swap' not in primary_blkid_result.stdout | default('')"
+    - name: Swap | Add primary swap file to /etc/fstab
+      ansible.posix.mount: { path: none, src: "{{ primary_swap_path }}", fstype: swap, opts: "sw,pri={{ primary_swap_priority | default('-2') }}", state: present }
+      register: primary_fstab_result
+      failed_when: primary_fstab_result.failed
+    - name: Swap | Activate primary swapfile if not active
+      ansible.builtin.command: { cmd: "swapon {{ primary_swap_path }}" }
+      when: primary_swap_path not in ansible_facts.mounts | map(attribute='device') | list
+      changed_when: true
+      register: primary_swapon_result
+      failed_when: primary_swapon_result.rc != 0
+- name: Swap | Setup secondary swap file on MicroSD
+  become: yes
+  when: [create_secondary_swap | default(false) | bool, use_microsd | default(false) | bool]
+  block:
+    - name: Swap | Set secondary swap file path fact
+      ansible.builtin.set_fact: { secondary_swap_file_path: "{{ microsd_mount_point }}/{{ secondary_swap_path_relative }}" }
+    - name: Swap | Verify MicroSD mount point exists (dependency check)
+      ansible.builtin.stat: { path: "{{ microsd_mount_point }}" }
+      register: microsd_mountpoint_stat
+    - name: Swap | Fail if MicroSD mount point doesn't exist
+      ansible.builtin.fail: { msg: "MicroSD mount point '{{ microsd_mount_point }}' must exist before creating swapfile there." }
+      when: not microsd_mountpoint_stat.stat.exists or not microsd_mountpoint_stat.stat.isdir
+    - name: Swap | Ensure secondary swap file exists with correct size (using fallocate)
+      ansible.builtin.command: { cmd: "fallocate -l {{ secondary_swap_size }} {{ secondary_swap_file_path }}", creates: "{{ secondary_swap_file_path }}" }
+      register: fallocate_secondary_result
+      changed_when: fallocate_secondary_result.rc == 0 and fallocate_secondary_result.stdout is search('created')
+      failed_when: fallocate_secondary_result.rc != 0 and 'already exists' not in fallocate_secondary_result.stderr
+    - name: Swap | Verify secondary swap file size and existence
+      ansible.builtin.stat: { path: "{{ secondary_swap_file_path }}" }
+      register: secondary_swap_stat
+      failed_when: not secondary_swap_stat.stat.exists or secondary_swap_stat.stat.size != (secondary_swap_size | human_to_bytes)
+    - name: Swap | Set permissions for secondary swap file
+      ansible.builtin.file: { path: "{{ secondary_swap_file_path }}", owner: root, group: root, mode: '0600' }
+      register: secondary_chmod_result
+      failed_when: secondary_chmod_result.failed
+    - name: Swap | Check if secondary path is already formatted as swap
+      ansible.builtin.command: { cmd: "blkid -p -o value -s TYPE {{ secondary_swap_file_path }}" }
+      register: secondary_blkid_result
+      changed_when: false
+      failed_when: false
+    - name: Swap | Format secondary swap file if not already formatted
+      community.general.filesystem: { fstype: swap, device: "{{ secondary_swap_file_path }}", force: no }
+      register: secondary_mkswap_result
+      failed_when: secondary_mkswap_result.failed
+      when: "'swap' not in secondary_blkid_result.stdout | default('')"
+    - name: Swap | Add secondary swap file to /etc/fstab
+      ansible.posix.mount: { path: none, src: "{{ secondary_swap_file_path }}", fstype: swap, opts: "sw,pri={{ secondary_swap_priority | default('10') }}", state: present }
+      register: secondary_fstab_result
+      failed_when: secondary_fstab_result.failed
+    - name: Swap | Activate secondary swapfile if not active
+      ansible.builtin.command: { cmd: "swapon {{ secondary_swap_file_path }}" }
+      when: secondary_swap_file_path not in ansible_facts.mounts | map(attribute='device') | list
+      changed_when: true
+      register: secondary_swapon_result
+      failed_when: secondary_swapon_result.rc != 0
+- name: Swap | Check active swap devices
+  become: yes
+  ansible.builtin.command: { cmd: swapon --show=NAME --noheadings }
+  register: swapon_output
+  changed_when: false
+  check_mode: no
+- name: Swap | Verify primary swap is active
+  ansible.builtin.assert: { that: [primary_swap_path in swapon_output.stdout_lines], fail_msg: "Primary swap file {{ primary_swap_path }} does not appear to be active! Active swaps: {{ swapon_output.stdout_lines | join(', ') }}", quiet: yes }
+  when: create_primary_swap | default(false) | bool
+- name: Swap | Verify secondary swap is active
+  ansible.builtin.assert: { that: [secondary_swap_file_path in swapon_output.stdout_lines], fail_msg: "Secondary swap file {{ secondary_swap_file_path }} does not appear to be active! Active swaps: {{ swapon_output.stdout_lines | join(', ') }}", quiet: yes }
+  when: [create_secondary_swap | default(false) | bool, use_microsd | default(false) | bool]

@@ -1,0 +1,238 @@
+---
+# Tasks for installing the Arch Linux base system (Role: base_system) - Stage 1
+- name: Base | Verify Essential Variables
+  ansible.builtin.assert: { that: [target_disk is defined, target_existing_partitions is defined, target_hostname is defined, locale_lang is defined, timezone is defined, keymap is defined, bootloader is defined, vault_root_password_hash is defined, vault_ldeen_password_hash is defined, controller_root_private_key_file is defined, target_user_ssh_pub_key is defined, base_packages is defined, target_user is defined, target_user_shell is defined], fail_msg: "Required variables not defined/complete in group_vars/all/config.yml or vault.yml not loaded.", quiet: yes }
+- name: Base | Check boot mode matches EFI requirement if specified
+  ansible.builtin.stat: { path: /sys/firmware/efi/efivars }
+  register: efi_check
+  ignore_errors: yes
+  when: boot_mode == 'UEFI'
+- name: Base | Validate boot mode configuration vs reality
+  ansible.builtin.fail: { msg: "Configured boot_mode 'UEFI' but EFI vars not found at /sys/firmware/efi/efivars." }
+  when: boot_mode == 'UEFI' and not efi_check.stat.exists
+- name: Base | Verify specified existing partitions exist on target disk
+  ansible.builtin.stat: { path: "{{ item.device }}" }
+  register: partition_stat_result
+  loop: "{{ target_existing_partitions }}"
+  loop_control: { label: "{{ item.device }}" }
+  failed_when: not partition_stat_result.stat.exists or not partition_stat_result.stat.isblk
+- name: Base | Unmount any existing mounts on target partitions (safety measure)
+  ansible.posix.mount: { path: "{{ item.device }}", state: unmounted }
+  loop: "{{ target_existing_partitions }}"
+  loop_control: { label: "{{ item.device }}" }
+  failed_when: false
+- name: Base | Unmount any existing mounts within potential /mnt (safety measure)
+  ansible.builtin.command: { cmd: "umount -R /mnt" }
+  changed_when: false
+  failed_when: false
+- name: Base | Inform user about formatting existing partitions
+  ansible.builtin.pause: { prompt: "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n!!! FORMATTING EXISTING PARTITIONS !!!\nThe next steps will REFORMAT the following EXISTING partitions on '{{ target_disk }}':\n{% for part in target_existing_partitions %}- Device: {{ part.device }}, Intended Mount: {{ part.mount_point }}, FS: {{ part.filesystem }}\n{% endfor %}ALL DATA on these partitions ({{ target_existing_partitions | map(attribute='device') | join(', ') }}) will be WIPED.\nPress Enter to continue, or Ctrl+C then 'A' to abort.\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", echo: yes }
+- name: Base | Format non-EFI partitions
+  community.general.filesystem: { device: "{{ item.device }}", fstype: "{{ item.filesystem }}", force: yes, opts: "{{ filesystem_options[item.mount_point] | default(omit) }}" }
+  loop: "{{ target_existing_partitions }}"
+  loop_control: { label: "{{ item.device }}" }
+  when: item.filesystem not in ['vfat', 'linux-swap', 'none']
+  register: format_result
+  failed_when: format_result.failed
+- name: Base | Format EFI partition (FAT32)
+  community.general.filesystem: { device: "{{ item.device }}", fstype: "vfat", force: yes, opts: "{{ filesystem_options[item.mount_point] | default('-F 32') }}" }
+  loop: "{{ target_existing_partitions }}"
+  loop_control: { label: "{{ item.device }}" }
+  when: item.filesystem == 'vfat'
+  register: format_efi_result
+  failed_when: format_efi_result.failed
+- name: Base | Find root partition details from config
+  ansible.builtin.set_fact: { root_part_info: "{{ target_existing_partitions | selectattr('mount_point', 'equalto', '/') | first }}" }
+- name: Base | Mount root partition to /mnt
+  ansible.posix.mount: { path: /mnt, src: "{{ root_part_info.device }}", fstype: "{{ root_part_info.filesystem }}", state: mounted }
+  register: mount_root_result
+  failed_when: mount_root_result.failed
+- name: Base | Create other mount point directories within /mnt
+  ansible.builtin.file: { path: "/mnt{{ item.mount_point }}", state: directory, mode: '0755' }
+  loop: "{{ target_existing_partitions | sort(attribute='mount_point') }}"
+  loop_control: { label: "{{ item.mount_point }}" }
+  when: item.mount_point not in ['/', 'none'] and item.mount_point is defined
+- name: Base | Mount other partitions within /mnt (sorted by path)
+  ansible.posix.mount: { path: "/mnt{{ item.mount_point }}", src: "{{ item.device }}", fstype: "{{ item.filesystem }}", state: mounted, opts: "{{ 'defaults,noatime' if item.filesystem == 'ext4' else 'defaults' }}" }
+  loop: "{{ target_existing_partitions | sort(attribute='mount_point') }}"
+  loop_control: { label: "{{ item.mount_point }}" }
+  when: item.mount_point not in ['/', 'none'] and item.mount_point is defined
+  register: mount_other_result
+  failed_when: mount_other_result.failed
+- name: Base | Update mirrorlist before pacstrap
+  ansible.builtin.command: { cmd: "pacman -Syy" }
+  changed_when: false
+  failed_when: false
+- name: Base | Run pacstrap to install base system and essential packages
+  ansible.builtin.command: { cmd: "pacstrap -K /mnt {{ base_packages | join(' ') }}" }
+  register: pacstrap_result
+  changed_when: true
+  failed_when: pacstrap_result.rc != 0
+- name: Base | Generate fstab using UUIDs
+  ansible.builtin.command: { cmd: "genfstab -U /mnt" }
+  register: genfstab_result
+  changed_when: false
+  failed_when: genfstab_result.rc != 0 or genfstab_result.stdout | length < 10
+- name: Base | Write fstab to new system
+  ansible.builtin.copy: { content: "{{ genfstab_result.stdout }}", dest: /mnt/etc/fstab, mode: '0644' }
+  register: fstab_write_result
+  failed_when: fstab_write_result.failed
+- name: Base | Verify fstab content (basic check)
+  ansible.builtin.assert: { that: ["'/' in genfstab_result.stdout", "'UUID=' in genfstab_result.stdout"], fail_msg: "Generated fstab appears incomplete or invalid.", quiet: yes }
+- name: Base | Set hostname via chroot
+  ansible.builtin.command: { cmd: "arch-chroot /mnt hostnamectl set-hostname {{ target_hostname }}" }
+  changed_when: true
+  register: set_hostname_result
+  failed_when: set_hostname_result.rc != 0
+- name: Base | Set timezone link via chroot
+  ansible.builtin.command: { cmd: "arch-chroot /mnt ln -sf /usr/share/zoneinfo/{{ timezone }} /etc/localtime" }
+  changed_when: true
+  register: set_timezone_result
+  failed_when: set_timezone_result.rc != 0
+- name: Base | Set hardware clock via chroot
+  ansible.builtin.command: { cmd: "arch-chroot /mnt hwclock --systohc" }
+  changed_when: true
+  register: set_hwclock_result
+  failed_when: set_hwclock_result.rc != 0
+- name: Base | Configure locale.gen via chroot
+  ansible.builtin.lineinfile: { path: /mnt/etc/locale.gen, regexp: "^#\\s*({{ locale_lang }}\\s+UTF-8)", line: "\\1", backrefs: yes }
+  register: locale_gen_change
+  notify: Generate locale via chroot
+  failed_when: locale_gen_change.failed
+- name: Base | Flush handlers to run locale-gen before reboot
+  ansible.builtin.meta: flush_handlers
+- name: Base | Set default locale in locale.conf via chroot
+  ansible.builtin.copy: { content: "LANG={{ locale_lang }}\n", dest: /mnt/etc/locale.conf, mode: '0644' }
+  register: set_locale_conf_result
+  failed_when: set_locale_conf_result.failed
+- name: Base | Set console keymap in vconsole.conf via chroot
+  ansible.builtin.copy: { content: "KEYMAP={{ keymap }}\n", dest: /mnt/etc/vconsole.conf, mode: '0644' }
+  register: set_vconsole_result
+  failed_when: set_vconsole_result.failed
+- name: Base | Generate initramfs via chroot
+  ansible.builtin.command: { cmd: "arch-chroot /mnt mkinitcpio -P" }
+  changed_when: true
+  register: mkinitcpio_result
+  failed_when: mkinitcpio_result.rc != 0
+- name: Base | Set root password using HASH from Vault via chroot
+  ansible.builtin.command: { cmd: "arch-chroot /mnt usermod -p '{{ vault_root_password_hash }}' root" }
+  changed_when: true
+  no_log: true
+  register: set_root_pass_result
+  failed_when: set_root_pass_result.rc != 0
+- name: Base | Get EFI mount point from config
+  ansible.builtin.set_fact: { efi_mount_point_on_target: "{{ target_existing_partitions | selectattr('mount_point', 'equalto', '/boot/efi') | map(attribute='mount_point') | first | default('/boot/efi') }}" }
+  when: bootloader == 'grub' and boot_mode == 'UEFI'
+- name: Base | Install GRUB bootloader via chroot (UEFI)
+  ansible.builtin.command: { cmd: "arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory={{ efi_mount_point_on_target }} --bootloader-id={{ grub_bootloader_id | default('GRUB') }} --recheck" }
+  changed_when: true
+  when: bootloader == 'grub' and boot_mode == 'UEFI'
+  register: grub_install_efi_result
+  failed_when: grub_install_efi_result.rc != 0
+- name: Base | Install GRUB bootloader via chroot (BIOS)
+  ansible.builtin.command: { cmd: "arch-chroot /mnt grub-install --target=i386-pc {{ target_disk }} --recheck" }
+  changed_when: true
+  when: bootloader == 'grub' and boot_mode == 'BIOS'
+  register: grub_install_bios_result
+  failed_when: grub_install_bios_result.rc != 0
+- name: Base | Generate GRUB configuration file via chroot
+  ansible.builtin.command: { cmd: "arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg" }
+  changed_when: true
+  when: bootloader == 'grub'
+  register: grub_mkconfig_result
+  failed_when: grub_mkconfig_result.rc != 0
+- name: Base | Set up temporary first-boot Wi-Fi connection service
+  when: [configure_wifi_in_stage1 | default(false) | bool, wifi_ssid is defined, vault_wifi_password is defined]
+  block:
+    - name: Base | Ensure /usr/local/bin exists in chroot
+      ansible.builtin.file: { path: /mnt/usr/local/bin, state: directory, mode: '0755', owner: root, group: root }
+    - name: Base | Create first-boot Wi-Fi connection script in chroot
+      ansible.builtin.copy: { dest: /mnt/usr/local/bin/connect-wifi-first-boot.sh, owner: root, group: root, mode: '0755', content: "#!/bin/bash\n# Set hostname, restart Avahi, connect Wi-Fi on first boot.\n/usr/bin/hostnamectl set-hostname {{ target_hostname }}\n/usr/bin/systemctl restart avahi-daemon.service || true\nsleep 15\n/usr/bin/nmcli device wifi connect '{{ wifi_ssid }}' password '{{ vault_wifi_password }}'\nexit 0" }
+    - name: Base | Create systemd service file for first-boot Wi-Fi connection
+      ansible.builtin.copy: { dest: /mnt/etc/systemd/system/connect-wifi-first-boot.service, owner: root, group: root, mode: '0644', content: "[Unit]\nDescription=Set hostname, restart Avahi, and connect WiFi on first boot\nWants=NetworkManager.service avahi-daemon.service\nAfter=NetworkManager.service avahi-daemon.service network.target\nBefore=network-online.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/local/bin/connect-wifi-first-boot.sh\n\n[Install]\nWantedBy=multi-user.target" }
+    - name: Base | Enable temporary first-boot Wi-Fi service via chroot
+      ansible.builtin.command: { cmd: "arch-chroot /mnt systemctl enable connect-wifi-first-boot.service" }
+      changed_when: true
+      register: enable_wifi_service_result
+      failed_when: enable_wifi_service_result.rc != 0
+- name: Base | Ensure NetworkManager is enabled via chroot
+  ansible.builtin.command: { cmd: "arch-chroot /mnt systemctl enable NetworkManager.service" }
+  changed_when: true
+  register: enable_nm_result
+  failed_when: enable_nm_result.rc != 0
+- name: Base | Ensure SSH daemon is enabled via chroot
+  ansible.builtin.command: { cmd: "arch-chroot /mnt systemctl enable sshd.service" }
+  changed_when: true
+  register: enable_sshd_result
+  failed_when: enable_sshd_result.rc != 0
+- name: Base | Ensure Avahi daemon is enabled via chroot
+  ansible.builtin.command: { cmd: "arch-chroot /mnt systemctl enable avahi-daemon.service" }
+  changed_when: true
+  register: enable_avahi_result
+  failed_when: enable_avahi_result.rc != 0
+- name: Base | Create target user '{{ target_user }}' with wheel group via chroot
+  ansible.builtin.command: { cmd: "arch-chroot /mnt useradd -m -U -G wheel -s {{ target_user_shell | default('/bin/bash') }} {{ target_user }}", creates: "/mnt/home/{{ target_user }}" }
+  changed_when: true
+  register: create_user_result
+  failed_when: create_user_result.rc != 0 and 'already exists' not in create_user_result.stderr
+- name: Base | Set target user password using HASH from Vault via chroot
+  ansible.builtin.command: { cmd: "arch-chroot /mnt usermod -p '{{ vault_ldeen_password_hash }}' {{ target_user }}" }
+  changed_when: true
+  no_log: true
+  register: set_user_pass_result
+  failed_when: set_user_pass_result.rc != 0
+- name: Base | Verify target user password field was updated in /etc/shadow
+  ansible.builtin.command: { cmd: "arch-chroot /mnt awk -F: -v user={{ target_user }} '$1 == user {print $2}' /etc/shadow" }
+  register: shadow_check
+  changed_when: false
+  failed_when: shadow_check.rc != 0 or shadow_check.stdout == "" or shadow_check.stdout.startswith('!') or shadow_check.stdout.startswith('*') or shadow_check.stdout != vault_ldeen_password_hash
+  no_log: true
+- name: Base | Ensure .ssh directory exists for root in new system
+  ansible.builtin.file: { path: /mnt/root/.ssh, state: directory, owner: root, group: root, mode: '0700' }
+- name: Base | Get absolute path to controller's root private key
+  ansible.builtin.set_fact: { controller_root_private_key_abs: "{{ controller_root_private_key_file.replace('~', lookup('env', 'HOME')) }}" }
+  delegate_to: localhost
+  become: no
+- name: Base | Construct path to controller's root public key
+  ansible.builtin.set_fact: { controller_root_public_key_abs: "{{ controller_root_private_key_abs.replace('.pub','') + '.pub' }}" }
+  delegate_to: localhost
+  become: no
+- name: Base | Verify controller root public key file exists
+  ansible.builtin.stat: { path: "{{ controller_root_public_key_abs }}" }
+  register: root_public_key_stat
+  delegate_to: localhost
+  become: no
+- name: Base | Fail if controller root public key file not found
+  ansible.builtin.fail: { msg: "Controller root public SSH key not found at {{ controller_root_public_key_abs }}. Cannot proceed." }
+  when: not root_public_key_stat.stat.exists
+  delegate_to: localhost
+  become: no
+- name: Base | Copy Controller's SSH public key for root login to new system
+  ansible.posix.authorized_key: { user: root, key: "{{ lookup('file', controller_root_public_key_abs ) }}", path: /mnt/root/.ssh/authorized_keys, state: present, manage_dir: no }
+- name: Base | Ensure .ssh directory exists for target user via chroot
+  ansible.builtin.command: { cmd: "arch-chroot /mnt install -d -o {{ target_user }} -g {{ target_user }} -m 700 /home/{{ target_user }}/.ssh", creates: "/mnt/home/{{ target_user }}/.ssh" }
+  changed_when: true
+- name: Base | Ensure authorized_keys file exists for target user via chroot
+  ansible.builtin.command: { cmd: "arch-chroot /mnt install -o {{ target_user }} -g {{ target_user }} -m 600 /dev/null /home/{{ target_user }}/.ssh/authorized_keys", creates: "/mnt/home/{{ target_user }}/.ssh/authorized_keys" }
+  changed_when: true
+- name: Base | Copy user's specified SSH public key content into file
+  ansible.builtin.copy: { content: "{{ target_user_ssh_pub_key }}\n", dest: "/mnt/home/{{ target_user }}/.ssh/authorized_keys", mode: '0644' }
+  when: target_user_ssh_pub_key is defined and target_user_ssh_pub_key | length > 10 and 'AAAA' in target_user_ssh_pub_key
+- name: Base | Set correct ownership and permissions on user .ssh dir and contents via chroot
+  ansible.builtin.shell: { cmd: "arch-chroot /mnt chown -R {{ target_user }}:{{ target_user }} /home/{{ target_user }}/.ssh && arch-chroot /mnt chmod 700 /home/{{ target_user }}/.ssh && arch-chroot /mnt chmod 600 /home/{{ target_user }}/.ssh/authorized_keys" }
+  changed_when: true
+  when: target_user_ssh_pub_key is defined and target_user_ssh_pub_key | length > 10 and 'AAAA' in target_user_ssh_pub_key
+  register: set_user_ssh_perms_result
+  failed_when: set_user_ssh_perms_result.rc != 0
+- name: Base | Configure passwordless sudo for wheel group via chroot
+  ansible.builtin.lineinfile: { path: /mnt/etc/sudoers, state: present, regexp: '^%wheel ALL=\(ALL:ALL\) NOPASSWD: ALL', line: '%wheel ALL=(ALL:ALL) NOPASSWD: ALL', validate: '/usr/sbin/visudo -cf %s' }
+  register: sudoers_result
+  failed_when: sudoers_result.failed
+- name: Base | Sync filesystem buffers to disk
+  ansible.builtin.command: sync
+  changed_when: false
+- name: Base | Reboot the machine (async)
+  ansible.builtin.shell: "sleep 5 && reboot"
+  async: 1
+  poll: 0
+  changed_when: true

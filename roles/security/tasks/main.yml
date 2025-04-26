@@ -1,0 +1,51 @@
+---
+# Tasks for firewall setup (Role: security) - Stage 2
+- name: Security | Determine firewall package name
+  ansible.builtin.set_fact: { firewall_package_name: "{% if firewall_choice == 'nftables' %}nftables{% elif firewall_choice == 'ufw' %}ufw{% else %}''{% endif %}" }
+  when: firewall_choice | default('none') != 'none'
+- name: Security | Install chosen firewall package
+  become: yes
+  ansible.builtin.package: { name: "{{ firewall_package_name }}", state: present }
+  register: firewall_pkg_result
+  failed_when: firewall_pkg_result.failed
+  when: firewall_choice | default('none') != 'none' and firewall_package_name | length > 0
+- name: Security | Configure nftables rules
+  become: yes
+  ansible.builtin.template: { src: nftables.conf.j2, dest: /etc/nftables.conf, mode: '0644', owner: root, group: root, validate: /usr/sbin/nft -c -f %s }
+  register: nftables_config_result
+  failed_when: nftables_config_result.failed
+  when: firewall_choice == 'nftables'
+  notify: Reload nftables
+- name: Security | Verify nftables SSH rule exists after reload
+  become: yes
+  ansible.builtin.command: { cmd: "nft list ruleset" }
+  register: nftables_ruleset_check
+  changed_when: false
+  failed_when: nftables_ruleset_check.rc != 0 or 'tcp dport 22 accept' not in nftables_ruleset_check.stdout
+  when: firewall_choice == 'nftables'
+  check_mode: no
+- name: Security | Configure UFW
+  when: firewall_choice == 'ufw'
+  become: yes
+  block:
+    - name: Security | Set UFW default policies
+      community.general.ufw: { default: deny, direction: incoming }
+      register: ufw_default_result
+      failed_when: ufw_default_result.failed
+    - name: Security | Allow SSH through UFW
+      community.general.ufw: { rule: allow, port: '22', proto: tcp }
+      register: ufw_allow_ssh_result
+      failed_when: ufw_allow_ssh_result.failed
+    - name: Security | Enable UFW
+      community.general.ufw: { state: enabled }
+      register: ufw_enable_result
+      failed_when: ufw_enable_result.failed
+  notify: Restart ufw
+- name: Security | Verify UFW SSH rule exists after enable/restart
+  become: yes
+  ansible.builtin.command: { cmd: "ufw status verbose" }
+  register: ufw_status_check
+  changed_when: false
+  failed_when: ufw_status_check.rc != 0 or '22/tcp' not in ufw_status_check.stdout or '(v6)' not in ufw_status_check.stdout or 'ALLOW IN' not in ufw_status_check.stdout
+  when: firewall_choice == 'ufw'
+  check_mode: no

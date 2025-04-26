@@ -1,0 +1,39 @@
+---
+# Tasks to configure networking (Using NetworkManager) (Role: network) - Stage 2
+- name: Network | Ensure NetworkManager package is installed
+  become: yes
+  ansible.builtin.package: { name: networkmanager, state: present }
+  register: nm_pkg_result
+  failed_when: nm_pkg_result.failed
+- name: Network | Ensure NetworkManager service is enabled and running
+  become: yes
+  ansible.builtin.systemd_service: { name: NetworkManager.service, enabled: yes, state: started }
+  register: nm_service_result
+  failed_when: nm_service_result.failed
+- name: Network | Verify NetworkManager service is active (using service_facts)
+  become: yes
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.services['NetworkManager.service'] is defined
+      - ansible_facts.services['NetworkManager.service'].state == 'running'
+    fail_msg: "NetworkManager service is not running! State: {{ ansible_facts.services['NetworkManager.service'].state | default('N/A') }}"
+    quiet: yes
+  check_mode: no
+- name: Network | Get NetworkManager general status
+  ansible.builtin.command: { cmd: nmcli -t -f STATE general status }
+  register: nm_general_status
+  changed_when: false
+  failed_when: nm_general_status.rc != 0
+  check_mode: no
+- name: Network | Verify system has network connectivity (general state)
+  ansible.builtin.assert: { that: ["'connected' in nm_general_status.stdout"], fail_msg: "NetworkManager general state is not 'connected'. Output: {{ nm_general_status.stdout }}", quiet: yes }
+- name: Network | Get active network connections
+  become: yes
+  ansible.builtin.command: { cmd: nmcli -t -f NAME,DEVICE connection show --active }
+  register: nm_active_connections
+  changed_when: false
+  failed_when: nm_active_connections.rc != 0
+  check_mode: no
+- name: Network | Verify expected Wi-Fi connection is active
+  ansible.builtin.assert: { that: [wifi_ssid in nm_active_connections.stdout], fail_msg: "Expected Wi-Fi connection '{{ wifi_ssid }}' not found in active connections. Active: {{ nm_active_connections.stdout | default('N/A') }}", quiet: yes }
+  when: [configure_wifi_in_stage1 | default(false) | bool, wifi_ssid is defined]
