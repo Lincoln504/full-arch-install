@@ -1431,7 +1431,6 @@ create_file_with_heredoc "${PROJECT_DIR}/roles/users/tasks/main.yml" << 'EOF'
       # Runs the script as the target user
       ansible.builtin.shell:
         cmd: "curl -L https://aka.ms/gcm/linux-install-source.sh | sh"
-        warn: false # The script itself prints messages
       environment:
         # Ensure user's PATH is likely available if running via sudo/become
         PATH: "/home/{{ target_user }}/.local/bin:/usr/local/bin:/usr/bin:/bin"
@@ -1469,7 +1468,6 @@ create_file_with_heredoc "${PROJECT_DIR}/roles/users/tasks/main.yml" << 'EOF'
         # Use printf to format input for 'git-credential-manager store'
         # Keys: protocol, host, username, password. Ends with blank line.
         cmd: 'printf "protocol=https\nhost=github.com\nusername=%s\npassword=%s\n\n" "{{ vault_github_username }}" "{{ vault_github_password }}" | git-credential-manager store'
-        warn: false # Avoid warning about using shell
       environment:
         PATH: "/home/{{ target_user }}/.local/bin:/usr/local/bin:/usr/bin:/bin"
       args:
