@@ -196,3 +196,4 @@ cursor_theme_name: "Adwaita"
 
 # --- Autorotation/Tablet Mode ---
 touchscreen_identifier_pattern: "Touch"
+vault_root_password_hash: test
